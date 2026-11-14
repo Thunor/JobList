@@ -18,6 +18,8 @@ struct JobListApp: App {
         }
         .commands {
             CommandGroup(replacing: .newItem) {
+                Button("New Database") { Task { await store.newDatabase() } }
+                    .keyboardShortcut("n")
                 Button("Open…") { store.isImporterPresented = true }
                     .keyboardShortcut("o")
             }

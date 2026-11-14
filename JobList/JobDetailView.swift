@@ -7,6 +7,7 @@ import SwiftUI
 
 struct JobDetailView: View {
     let job: JobPosting?
+    var selectionCount = 0
 
     var body: some View {
         if let job {
@@ -38,6 +39,9 @@ struct JobDetailView: View {
                 }
             }
             .formStyle(.grouped)
+        } else if selectionCount > 1 {
+            ContentUnavailableView("\(selectionCount) Jobs Selected", systemImage: "briefcase",
+                                   description: Text("Press ⌘E to export them to Excel."))
         } else {
             ContentUnavailableView("No Selection", systemImage: "briefcase", description: Text("Select a job to see its details."))
         }
