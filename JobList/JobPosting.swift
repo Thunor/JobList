@@ -5,13 +5,12 @@
 
 import Foundation
 
-/// A single job record as stored in the JSON files and the job database.
+/// A single job record as stored in the JSON files.
 ///
-/// Display text and sort keys are computed once at import time rather than on
-/// every row render.
+/// Display text, sort keys, and the search index are computed once at load time
+/// rather than on every sort comparison, filter pass, or row render.
 nonisolated struct JobPosting: Identifiable, Hashable, Sendable, Decodable {
-    /// The database row ID; zero for records that haven't been imported.
-    let id: Int64
+    let id = UUID()
     let title: String
     let company: String
     let applyUrl: URL?
@@ -37,11 +36,8 @@ nonisolated struct JobPosting: Identifiable, Hashable, Sendable, Decodable {
     let countriesText: String
     let categoriesText: String
     let salaryText: String
-
-    /// Case- and diacritic-folded text of all searchable fields, stored in the database's search index.
-    var searchIndex: String {
-        Self.fold([title, company, rawLocation, source, tagsText, countriesText, categoriesText].joined(separator: "\n"))
-    }
+    /// Case- and diacritic-folded text of all searchable fields.
+    let searchIndex: String
 
     private enum CodingKeys: String, CodingKey {
         case title, company, applyUrl, source, postedAt, tags, countries, rawLocation
@@ -49,7 +45,6 @@ nonisolated struct JobPosting: Identifiable, Hashable, Sendable, Decodable {
     }
 
     init(
-        id: Int64 = 0,
         title: String,
         company: String,
         applyUrl: URL? = nil,
@@ -66,41 +61,6 @@ nonisolated struct JobPosting: Identifiable, Hashable, Sendable, Decodable {
         workMode: String = "",
         categories: [String] = []
     ) {
-        self.init(
-            id: id, title: title, company: company, applyUrl: applyUrl, source: source, postedAt: postedAt,
-            tags: tags,
-            // The source data mixes cities, states, and addresses into `countries`.
-            countries: CountryNormalizer.countries(from: countries, rawLocation: rawLocation),
-            countriesText: countries.joined(separator: ", "),
-            rawLocation: rawLocation, compType: compType, minAmount: minAmount, maxAmount: maxAmount,
-            currency: currency, rawSalaryText: rawSalaryText, workMode: workMode, categories: categories,
-            salaryText: Self.makeSalaryText(raw: rawSalaryText, min: minAmount, max: maxAmount, currency: currency)
-        )
-    }
-
-    /// Recreates a record read back from the database, whose countries are already
-    /// normalized and whose display text is already computed.
-    init(
-        id: Int64,
-        title: String,
-        company: String,
-        applyUrl: URL?,
-        source: String,
-        postedAt: Date?,
-        tags: [String],
-        countries: [String],
-        countriesText: String,
-        rawLocation: String,
-        compType: String,
-        minAmount: Double?,
-        maxAmount: Double?,
-        currency: String?,
-        rawSalaryText: String?,
-        workMode: String,
-        categories: [String],
-        salaryText: String
-    ) {
-        self.id = id
         self.title = title
         self.company = company
         self.applyUrl = applyUrl
@@ -120,9 +80,12 @@ nonisolated struct JobPosting: Identifiable, Hashable, Sendable, Decodable {
         postedAtSortKey = postedAt ?? .distantPast
         salarySortKey = maxAmount ?? minAmount ?? -1
         tagsText = tags.joined(separator: ", ")
-        self.countriesText = countriesText
+        countriesText = countries.joined(separator: ", ")
         categoriesText = categories.joined(separator: ", ")
-        self.salaryText = salaryText
+        salaryText = Self.makeSalaryText(raw: rawSalaryText, min: minAmount, max: maxAmount, currency: currency)
+        searchIndex = Self.fold(
+            [title, company, rawLocation, source, tagsText, countriesText, categoriesText].joined(separator: "\n")
+        )
     }
 
     /// Lenient decoding: missing or null fields fall back to sensible defaults
@@ -148,7 +111,7 @@ nonisolated struct JobPosting: Identifiable, Hashable, Sendable, Decodable {
         )
     }
 
-    // Identity is the database row ID, which keeps hashing and equality cheap.
+    // Identity is the generated `id`, which keeps hashing and equality cheap.
     static func == (lhs: JobPosting, rhs: JobPosting) -> Bool { lhs.id == rhs.id }
     func hash(into hasher: inout Hasher) { hasher.combine(id) }
 

@@ -5,116 +5,75 @@
 
 import Foundation
 import Observation
+import UniformTypeIdentifiers
 
-/// Owns the job database: imports JSON and Excel files into it and reopens it on launch.
-///
-/// Records themselves are never held here; views query the database through
-/// `JobWindow` and `JobDatabase`.
+/// Holds the currently loaded job file and the distinct values used by the filter pickers.
 @Observable
 final class JobStore {
-    private(set) var database: JobDatabase?
-    /// Incremented every time a database is opened so views can tell when the jobs were replaced.
+    private(set) var jobs: [JobPosting] = []
+    private(set) var options = FilterOptions()
+    private(set) var fileName: String?
+    /// Incremented on every successful load so views can tell when `jobs` was replaced.
     private(set) var version = 0
     private(set) var isLoading = false
-    /// Import progress from 0 to 1, or `nil` when not importing.
-    private(set) var importProgress: Double?
+    var errorTitle = ""
     var errorMessage: String?
     var isImporterPresented = false
+    var isExporterPresented = false
 
-    var options: FilterOptions { database?.options ?? FilterOptions() }
-    var fileName: String? { database?.sourceName }
-    var jobCount: Int { database?.totalCount ?? 0 }
+    /// File types that can be opened or dropped on the window.
+    static let importableTypes: [UTType] = [.json, .xlsx]
 
-    @ObservationIgnored private let databaseURL: URL
-    /// The restore or import in progress, kept so it can be cancelled.
-    @ObservationIgnored private var loadTask: Task<Void, Never>?
+    private var jobsByID: [JobPosting.ID: JobPosting] = [:]
 
-    init(databaseURL: URL = JobDatabase.defaultURL) {
-        self.databaseURL = databaseURL
+    func job(withID id: JobPosting.ID?) -> JobPosting? {
+        id.flatMap { jobsByID[$0] }
     }
 
-    /// Reopens the jobs imported in a previous session, if there are any.
-    func restore() async {
-        guard database == nil, !isLoading else { return }
+    func load(from url: URL) async {
         isLoading = true
         defer { isLoading = false }
 
-        await run {
-            // A missing database, or one from an incompatible version, just means starting empty.
-            guard let opened = try? await JobDatabase.open(self.databaseURL),
-                  !Task.isCancelled, self.database == nil else { return }
-            self.apply(opened)
+        do {
+            let file = try await Self.read(url)
+            jobs = file.jobs
+            jobsByID = file.jobsByID
+            options = file.options
+            fileName = url.lastPathComponent
+            version += 1
+        } catch {
+            errorTitle = "Couldn’t Open File"
+            errorMessage = "“\(url.lastPathComponent)” could not be read as a job list.\n\(error.localizedDescription)"
         }
     }
 
-    /// Stops the restore or import in progress. A cancelled import leaves the current database as it was.
-    func cancelLoading() {
-        loadTask?.cancel()
+    private struct LoadedFile: Sendable {
+        let jobs: [JobPosting]
+        let jobsByID: [JobPosting.ID: JobPosting]
+        let options: FilterOptions
     }
 
-    /// Cancels any restore or import, then discards the current jobs and deletes the
-    /// database file, leaving an empty database ready for a new import.
-    func newDatabase() async {
-        if let loadTask {
-            loadTask.cancel()
-            await loadTask.value
-        }
-        try? FileManager.default.removeItem(at: databaseURL)
-        database = nil
-        version += 1
-    }
+    /// Reads, decodes, and indexes the file off the main actor so the UI stays responsive.
+    @concurrent
+    private nonisolated static func read(_ url: URL) async throws -> LoadedFile {
+        // Files chosen through the open panel or dropped on the window are security scoped.
+        let accessing = url.startAccessingSecurityScopedResource()
+        defer { if accessing { url.stopAccessingSecurityScopedResource() } }
 
-    func job(withID id: JobPosting.ID?) async -> JobPosting? {
-        guard let id, let database else { return nil }
-        return try? await database.fetchJobs(withIDs: [id]).first
-    }
-
-    /// Imports a JSON or Excel file into a new database, replacing the current one when it succeeds.
-    func load(from url: URL) async {
-        guard !isLoading else { return }
-        isLoading = true
-        importProgress = 0
-        defer {
-            isLoading = false
-            importProgress = nil
-        }
-
-        await run {
-            do {
-                let database = try await JobDatabase.importFile(from: url, to: self.databaseURL) { fraction in
-                    Task { @MainActor in
-                        // Ignore updates that arrive after the import has finished.
-                        guard self.importProgress != nil else { return }
-                        self.importProgress = fraction
-                    }
-                }
-                guard !Task.isCancelled else { return }
-                self.apply(database)
-            } catch is CancellationError {
-                // Cancelled by the user; nothing to report.
-            } catch {
-                guard !Task.isCancelled else { return }
-                self.errorMessage = "“\(url.lastPathComponent)” could not be imported as a job list.\n\(error.localizedDescription)"
-            }
-        }
-    }
-
-    /// Runs `work` as the cancellable load task and waits for it to finish.
-    private func run(_ work: @escaping () async -> Void) async {
-        let task = Task { await work() }
-        loadTask = task
-        await task.value
-        loadTask = nil
-    }
-
-    private func apply(_ database: JobDatabase) {
-        self.database = database
-        version += 1
+        let data = try Data(contentsOf: url, options: .mappedIfSafe)
+        let jobs = url.pathExtension.lowercased() == "xlsx"
+            ? try JobPosting.decodeSpreadsheet(from: data)
+            : try JobPosting.decodeList(from: data)
+        return LoadedFile(
+            jobs: jobs,
+            jobsByID: Dictionary(uniqueKeysWithValues: jobs.map { ($0.id, $0) }),
+            options: FilterOptions(jobs: jobs)
+        )
     }
 }
 
 /// Sorted, distinct values for each filterable field.
-nonisolated struct FilterOptions: Codable, Sendable {
+nonisolated struct FilterOptions: Sendable {
     var sources: [String] = []
     var companies: [String] = []
     var workModes: [String] = []
@@ -123,4 +82,20 @@ nonisolated struct FilterOptions: Codable, Sendable {
     var countries: [String] = []
     var categories: [String] = []
     var currencies: [String] = []
+
+    init() {}
+
+    init(jobs: [JobPosting]) {
+        func distinct(_ values: some Sequence<String>) -> [String] {
+            Set(values.filter { !$0.isEmpty }).sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+        }
+        sources = distinct(jobs.lazy.map(\.source))
+        companies = distinct(jobs.lazy.map(\.company))
+        workModes = distinct(jobs.lazy.map(\.workMode))
+        compTypes = distinct(jobs.lazy.map(\.compType))
+        tags = distinct(jobs.lazy.flatMap(\.tags))
+        countries = distinct(jobs.lazy.flatMap(\.countries))
+        categories = distinct(jobs.lazy.flatMap(\.categories))
+        currencies = distinct(jobs.lazy.compactMap(\.currency))
+    }
 }

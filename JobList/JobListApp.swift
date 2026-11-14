@@ -18,10 +18,13 @@ struct JobListApp: App {
         }
         .commands {
             CommandGroup(replacing: .newItem) {
-                Button("New Database") { Task { await store.newDatabase() } }
-                    .keyboardShortcut("n")
                 Button("Open…") { store.isImporterPresented = true }
                     .keyboardShortcut("o")
+            }
+            CommandGroup(after: .saveItem) {
+                Button("Export as Excel…") { store.isExporterPresented = true }
+                    .keyboardShortcut("e", modifiers: [.command, .shift])
+                    .disabled(store.jobs.isEmpty)
             }
         }
     }
